@@ -9,3 +9,5 @@ class G1MujocoEnvCfg(G1EnvCfg, MujocoEnvCfg):
     # ====== ENV CONFIGURATION ======
 
     update_with_fk: bool = True
+    camera_capture_enabled: bool = True
+    camera_capture_interval_s: float = 1.0

@@ -479,9 +479,9 @@ class MyCustomPolicy(Policy):
         self._udp_broadcast_sock = None
         
         try:
-            b_cfg = os.getenv("MOTION_TRACKING_UDP_BROADCAST", None)
+            b_cfg = os.getenv("MOTION_TRACKING_UDP_BROADCAST", "127.0.0.1:15001")
             print(f"[MOTION_TRACKING] UDP broadcaster config: {b_cfg}", flush=True)
-            if b_cfg:
+            if b_cfg and b_cfg.strip().lower() not in {"0", "false", "off", "none", "disabled"}:
                 parts = b_cfg.split(":")
                 host = parts[0]
                 port = int(parts[1]) if len(parts) > 1 else 15001
@@ -765,6 +765,41 @@ class MyCustomPolicy(Policy):
 
         return root_command, udp_command, ee_cmd_12, extra
 
+    def _broadcast_env_state(self, env_data):
+        if not self._udp_broadcast_enabled or self._udp_broadcast_sock is None:
+            return
+
+        base_pos = getattr(env_data, "base_pos", None)
+        base_quat = getattr(env_data, "base_quat", None)
+        if base_pos is None or base_quat is None:
+            return
+
+        base_pos = np.asarray(base_pos, dtype=np.float32).reshape(-1)
+        base_quat_xyzw = np.asarray(base_quat, dtype=np.float32).reshape(-1)
+        if base_pos.shape[0] < 3 or base_quat_xyzw.shape[0] < 4:
+            return
+        if not np.all(np.isfinite(base_pos[:3])) or not np.all(np.isfinite(base_quat_xyzw[:4])):
+            return
+
+        qx, qy, qz, qw = base_quat_xyzw[:4]
+        fields = [
+            f"{time.time():.6f}",
+            f"{base_pos[0]:.6f}",
+            f"{base_pos[1]:.6f}",
+            f"{base_pos[2]:.6f}",
+            f"{qw:.6f}",
+            f"{qx:.6f}",
+            f"{qy:.6f}",
+            f"{qz:.6f}",
+            "0",
+        ]
+        payload = ",".join(fields).encode("ascii")
+
+        try:
+            self._udp_broadcast_sock.sendto(payload, self._udp_broadcast_addr)
+            self._udp_broadcast_seq += 1
+        except Exception as e:
+            print(f"[MOTION_TRACKING] UDP broadcast send failed: {e}", flush=True)
 
     # -------------------------
     # Buffer update
@@ -823,6 +858,7 @@ class MyCustomPolicy(Policy):
 
         N = self.num_envs
 
+        self._broadcast_env_state(env_data)
         root_cmd7, udp_cmd3, ee12, extra = self._get_udp_control()
 
         # ====== 构建 6 维 command ======

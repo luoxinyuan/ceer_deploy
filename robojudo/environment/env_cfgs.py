@@ -31,3 +31,10 @@ class MujocoEnvCfg(EnvCfg):
     sim_decimation: int = 20
 
     visualize_extras: bool = True  # TODO: remove
+
+    camera_capture_enabled: bool = False
+    camera_name: str = "robot_pov"
+    camera_capture_interval_s: float = 1.0
+    camera_image_width: int = 640
+    camera_image_height: int = 480
+    camera_output_dir: str = "logs/robot_pov"

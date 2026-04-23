@@ -14,3 +14,4 @@ mujoco
 msgpack
 msgpack-numpy
 colorlog
+imageio

@@ -1,9 +1,15 @@
 # Fix OMP perfmance issue on ARM platform (Jetson)
 import os
 import platform
+import sys
+from pathlib import Path
 
 if platform.machine().startswith("aarch64"):
     os.environ["OMP_NUM_THREADS"] = "1"
+
+REPO_ROOT = Path(__file__).resolve().parents[1]
+if str(REPO_ROOT) not in sys.path:
+    sys.path.insert(0, str(REPO_ROOT))
 
 import argparse
 import logging
