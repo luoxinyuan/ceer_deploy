@@ -336,7 +336,7 @@
     </body>
 
     <!-- box: dynamic object on table -->
-    <body name="box" pos="1.2 0 0.76">
+    <body name="box" pos="0.85 0 0.76">
       <freejoint/>
       <geom name="box_geom"
             type="box"

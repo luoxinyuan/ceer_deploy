@@ -782,6 +782,16 @@ class MyCustomPolicy(Policy):
             return
 
         qx, qy, qz, qw = base_quat_xyzw[:4]
+        dynamic_objects = []
+        for obj_name, obj_pos, obj_quat_xyzw in (getattr(env_data, "dynamic_objects", []) or []):
+            obj_pos = np.asarray(obj_pos, dtype=np.float32).reshape(-1)
+            obj_quat_xyzw = np.asarray(obj_quat_xyzw, dtype=np.float32).reshape(-1)
+            if obj_pos.shape[0] < 3 or obj_quat_xyzw.shape[0] < 4:
+                continue
+            if not np.all(np.isfinite(obj_pos[:3])) or not np.all(np.isfinite(obj_quat_xyzw[:4])):
+                continue
+            dynamic_objects.append((obj_name, obj_pos, obj_quat_xyzw))
+
         fields = [
             f"{time.time():.6f}",
             f"{base_pos[0]:.6f}",
@@ -791,8 +801,19 @@ class MyCustomPolicy(Policy):
             f"{qx:.6f}",
             f"{qy:.6f}",
             f"{qz:.6f}",
-            "0",
+            str(len(dynamic_objects)),
         ]
+        for obj_name, obj_pos, obj_quat_xyzw in dynamic_objects:
+            fields.extend([
+                str(obj_name),
+                f"{obj_pos[0]:.6f}",
+                f"{obj_pos[1]:.6f}",
+                f"{obj_pos[2]:.6f}",
+                f"{obj_quat_xyzw[0]:.6f}",
+                f"{obj_quat_xyzw[1]:.6f}",
+                f"{obj_quat_xyzw[2]:.6f}",
+                f"{obj_quat_xyzw[3]:.6f}",
+            ])
         payload = ",".join(fields).encode("ascii")
 
         try:

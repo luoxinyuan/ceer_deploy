@@ -42,6 +42,15 @@ def main():
     config_manager = ConfigManager(config_name=args.config)
 
     cfg: RlPipelineCfg = config_manager.get_cfg()
+    if hasattr(cfg, "env"):
+        print(
+            "[run_pipeline] env="
+            f"{getattr(cfg.env, 'env_type', None)} "
+            f"camera_capture_enabled={getattr(cfg.env, 'camera_capture_enabled', None)} "
+            f"camera_udp={getattr(cfg.env, 'camera_udp_host', None)}:"
+            f"{getattr(cfg.env, 'camera_udp_port', None)}",
+            flush=True,
+        )
 
     pipeline_type = cfg.pipeline_type
 

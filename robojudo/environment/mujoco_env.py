@@ -1,6 +1,9 @@
 import logging
+import socket
+import struct
 import sys
 import time
+from io import BytesIO
 from pathlib import Path
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
@@ -17,6 +20,10 @@ from robojudo.environment.utils.mujoco_viz import MujocoVisualizer
 from robojudo.utils.util_func import quat_rotate_inverse_np, quatToEuler
 
 logger = logging.getLogger(__name__)
+
+VLM_IMAGE_MAGIC = b"VLM1"
+VLM_IMAGE_HEADER_FMT = "<4sIQHH"
+VLM_IMAGE_HEADER_SIZE = struct.calcsize(VLM_IMAGE_HEADER_FMT)
 
 
 @env_registry.register
@@ -104,8 +111,20 @@ class MujocoEnv(Environment):
         self.camera_capture_enabled = bool(self.cfg_env.camera_capture_enabled)
         self.camera_renderer = None
         self.camera_image_writer = None
+        self.camera_udp_sock = None
+        self.camera_udp_addr = None
         self.camera_frame_i = 0
+        self.camera_udp_printed_first_frame = False
         self.next_camera_capture_time = time.time()
+
+        print(
+            "[CEER camera] init "
+            f"enabled={self.camera_capture_enabled} "
+            f"name={self.cfg_env.camera_name} "
+            f"host={getattr(self.cfg_env, 'camera_udp_host', None)} "
+            f"port={getattr(self.cfg_env, 'camera_udp_port', None)}",
+            flush=True,
+        )
 
         if not self.camera_capture_enabled:
             return
@@ -119,33 +138,85 @@ class MujocoEnv(Environment):
         try:
             import imageio.v2 as imageio
         except ImportError:
-            logger.warning("Camera capture disabled: install imageio to save PNG frames.")
+            logger.warning("Camera capture disabled: install imageio to encode JPEG frames.")
             self.camera_capture_enabled = False
             return
 
-        output_dir = Path(self.cfg_env.camera_output_dir)
-        if not output_dir.is_absolute():
-            output_dir = REPO_ROOT / output_dir
-        output_dir.mkdir(parents=True, exist_ok=True)
-
-        self.camera_output_dir = output_dir
         self.camera_image_writer = imageio
+        self.camera_udp_addr = (
+            str(self.cfg_env.camera_udp_host),
+            int(self.cfg_env.camera_udp_port),
+        )
+        self.camera_udp_sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        self.camera_udp_sock.setblocking(False)
         self.camera_renderer = mujoco.Renderer(
             self.model,
             height=int(self.cfg_env.camera_image_height),
             width=int(self.cfg_env.camera_image_width),
         )
         logger.info(
-            "Saving camera '%s' every %.2fs to %s",
+            "Sending camera '%s' every %.2fs to udp://%s:%d",
             self.cfg_env.camera_name,
             self.cfg_env.camera_capture_interval_s,
-            output_dir,
+            self.camera_udp_addr[0],
+            self.camera_udp_addr[1],
+        )
+        print(
+            f"[CEER camera] sending '{self.cfg_env.camera_name}' every "
+            f"{self.cfg_env.camera_capture_interval_s:.2f}s to "
+            f"udp://{self.camera_udp_addr[0]}:{self.camera_udp_addr[1]}",
+            flush=True,
         )
 
-    def _write_image_atomic(self, path: Path, rgb: np.ndarray):
-        tmp_path = path.with_name(f"{path.stem}.tmp{path.suffix}")
-        self.camera_image_writer.imwrite(tmp_path, rgb)
-        tmp_path.replace(path)
+    def _encode_camera_jpeg(self, rgb: np.ndarray) -> bytes:
+        buf = BytesIO()
+        quality = max(1, min(100, int(self.cfg_env.camera_jpeg_quality)))
+        self.camera_image_writer.imwrite(buf, rgb, format="jpeg", quality=quality)
+        return buf.getvalue()
+
+    def _send_camera_jpeg(self, jpeg: bytes, stamp_ms: int):
+        if self.camera_udp_sock is None or self.camera_udp_addr is None:
+            return
+
+        max_payload = 9000 - VLM_IMAGE_HEADER_SIZE
+        max_chunk = max(512, min(int(self.cfg_env.camera_udp_max_chunk_size), max_payload))
+        chunk_count = max(1, (len(jpeg) + max_chunk - 1) // max_chunk)
+        if chunk_count > 65535:
+            logger.warning("Camera JPEG too large for UDP chunk protocol: %d bytes", len(jpeg))
+            return
+
+        frame_id = self.camera_frame_i & 0xFFFFFFFF
+        for chunk_index in range(chunk_count):
+            start = chunk_index * max_chunk
+            chunk = jpeg[start:start + max_chunk]
+            header = struct.pack(
+                VLM_IMAGE_HEADER_FMT,
+                VLM_IMAGE_MAGIC,
+                frame_id,
+                stamp_ms,
+                chunk_index,
+                chunk_count,
+            )
+            try:
+                self.camera_udp_sock.sendto(header + chunk, self.camera_udp_addr)
+            except BlockingIOError:
+                return
+            except OSError as e:
+                logger.warning("Camera UDP send failed: %s", e)
+                return
+        logger.info(
+            "Sent camera frame %d: %d bytes in %d UDP chunks",
+            frame_id,
+            len(jpeg),
+            chunk_count,
+        )
+        if not self.camera_udp_printed_first_frame:
+            print(
+                f"[CEER camera] sent first frame {frame_id}: "
+                f"{len(jpeg)} bytes in {chunk_count} UDP chunks",
+                flush=True,
+            )
+            self.camera_udp_printed_first_frame = True
 
     def _maybe_capture_camera(self):
         if not self.camera_capture_enabled:
@@ -163,10 +234,8 @@ class MujocoEnv(Environment):
         rgb = self.camera_renderer.render()
 
         stamp_ms = int(now * 1000)
-        frame_path = self.camera_output_dir / f"{self.cfg_env.camera_name}_{self.camera_frame_i:06d}_{stamp_ms}.png"
-        latest_path = self.camera_output_dir / "latest.png"
-        self._write_image_atomic(frame_path, rgb)
-        self._write_image_atomic(latest_path, rgb)
+        jpeg = self._encode_camera_jpeg(rgb)
+        self._send_camera_jpeg(jpeg, stamp_ms)
 
     def set_born_place(self, quat: np.ndarray | None = None, pos: np.ndarray | None = None):
         quat_ = self.base_quat if quat is None else quat
@@ -209,6 +278,27 @@ class MujocoEnv(Environment):
             self._torso_quat = fk_info[self._torso_name]["quat"]
             self._torso_pos = fk_info[self._torso_name]["pos"]
 
+        self._dynamic_objects = self._get_dynamic_objects()
+
+    def _get_dynamic_objects(self):
+        objects = []
+        for body_name in ("box",):
+            body_id = mujoco.mj_name2id(self.model, mujoco.mjtObj.mjOBJ_BODY, body_name)
+            if body_id == -1:
+                continue
+
+            pos = self.data.xpos[body_id].astype(np.float32).copy()
+            quat_wxyz = self.data.xquat[body_id].astype(np.float32).copy()
+            quat_xyzw = quat_wxyz[[1, 2, 3, 0]]
+
+            if self.born_place_align:
+                quat_xyzw, pos = self.base_align.align_transform(quat_xyzw, pos)
+                quat_xyzw = quat_xyzw.astype(np.float32)
+                pos = pos.astype(np.float32)
+
+            objects.append((body_name, pos, quat_xyzw))
+        return objects
+
     def step(self, pd_target, hand_pose=None):
         assert len(pd_target) == self.num_dofs, "pd_target len should be num_dofs of env"
 
@@ -236,6 +326,8 @@ class MujocoEnv(Environment):
     def shutdown(self):
         if self.camera_renderer is not None and hasattr(self.camera_renderer, "close"):
             self.camera_renderer.close()
+        if self.camera_udp_sock is not None:
+            self.camera_udp_sock.close()
         self.viewer.close()
 
 

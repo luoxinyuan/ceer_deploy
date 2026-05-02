@@ -38,3 +38,7 @@ class MujocoEnvCfg(EnvCfg):
     camera_image_width: int = 640
     camera_image_height: int = 480
     camera_output_dir: str = "logs/robot_pov"
+    camera_udp_host: str = "127.0.0.1"
+    camera_udp_port: int = 15002
+    camera_jpeg_quality: int = 75
+    camera_udp_max_chunk_size: int = 8192
